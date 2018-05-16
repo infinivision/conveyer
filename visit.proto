@@ -1,0 +1,17 @@
+syntax = "proto3";
+package main;
+
+import "gogoproto/gogo.proto";
+
+option (gogoproto.marshaler_all) = true;
+option (gogoproto.sizer_all) = true;
+option (gogoproto.unmarshaler_all) = true;
+option (gogoproto.goproto_getters_all) = false;
+
+message Visit {
+	uint64     Uid       = 1;
+	uint64     VisitTime = 2;
+	uint64     Location  = 3;
+	uint32     Age       = 4;
+    bool       IsMale    = 5;
+}
