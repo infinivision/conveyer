@@ -82,8 +82,47 @@ func (h *MyTestHandler) HandleMessage(message *nsq.Message) (err error) {
 	}
 	if _, err = h.ckConnect.Exec(h.sql, visit.Uid, visitTime, visitTime, visit.Location, uint8(visit.Age), sex); err != nil {
 		h.messagesFailed++
+		err = errors.Wrapf(err, "")
 		return
 	}
+	return
+}
+
+func publishTestMessages(cc *ConveyerConfig) (err error) {
+	if !cc.Test {
+		return
+	}
+
+	var tpm *nsq.TopicProducerMgr
+	nc := nsq.NewConfig()
+	tpm, err = nsq.NewTopicProducerMgr([]string{cc.Topic}, nc)
+	if err != nil {
+		err = errors.Wrapf(err, "")
+		return
+	}
+	tpm.AddLookupdNodes(strings.Split(cc.NsqlookupdURLs, ","))
+	var v Visit
+	var data []byte
+	for i := 0; i < 1000; i++ {
+		v.Uid = uint64(i)
+		v.VisitTime = uint64(time.Now().Unix())
+		v.Location = uint64(i)
+		v.Age = uint32(i)
+		if i&0x1 == 0 {
+			v.IsMale = false
+		} else {
+			v.IsMale = true
+		}
+		if data, err = v.Marshal(); err != nil {
+			err = errors.Wrapf(err, "")
+			return
+		}
+		if err = tpm.Publish(cc.Topic, data); err != nil {
+			err = errors.Wrapf(err, "")
+			return
+		}
+	}
+	tpm.Stop()
 	return
 }
 
@@ -93,7 +132,8 @@ type ConveyerConfig struct {
 	Channel        string
 	ClickHouseURL  string
 	Table          string
-	Window         int //merge time window, in seconds
+	Window         int  //merge time window, in seconds
+	Test           bool //publish some test messages to NSQ
 }
 
 func NewConveyerConfig() (conf *ConveyerConfig) {
@@ -104,6 +144,7 @@ func NewConveyerConfig() (conf *ConveyerConfig) {
 		ClickHouseURL:  "tcp://127.0.0.1:9000?compress=true&debug=true",
 		Table:          "visits",
 		Window:         60 * 60,
+		Test:           false,
 	}
 	return conf
 }
@@ -116,6 +157,7 @@ func parseConfig() (conf *ConveyerConfig) {
 	flagSet.StringVar(&conf.Channel, "channel", conf.Channel, "NSQ channel.")
 	flagSet.StringVar(&conf.ClickHouseURL, "clickhouse-url", conf.ClickHouseURL, "ClickHouse url.")
 	flagSet.IntVar(&conf.Window, "window", conf.Window, "Merge time window, in seconds.")
+	flagSet.BoolVar(&conf.Test, "test", conf.Test, "Publish some test messages to NSQ.")
 	flagSet.Parse(os.Args[1:])
 	return
 }
@@ -131,6 +173,10 @@ func main() {
 	var db *sqlx.DB
 	var sql string
 	cc := parseConfig()
+
+	err = publishTestMessages(cc)
+	checkErr(err)
+
 	db, sql, err = prepareClickhouse(cc)
 	checkErr(err)
 
