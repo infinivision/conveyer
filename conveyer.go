@@ -23,9 +23,8 @@ import (
 )
 
 const (
-	SIZE_VISIT_CH   int = 1000
 	CK_INSERT_BATCH int = 1000
-	NUM_TEST_MSG    int = 100
+	VISIT_CH_SIZE   int = 2 * CK_INSERT_BATCH
 )
 
 type VisitMsgHandler struct {
@@ -33,15 +32,20 @@ type VisitMsgHandler struct {
 	messagesSent     int
 	messagesReceived int
 	messagesFailed   int
-	window           *cache.Cache
-	visitCh          chan *Visit
+	visitCh          chan *VisitMsg
 }
 
-func NewVisitMsgHandler(consumer *nsq.Consumer, window int) (vmh *VisitMsgHandler) {
+type VisitMsg struct {
+	msg   *nsq.Message
+	visit *Visit
+	key   string
+}
+
+//There can be multiple VisitMsgHandler instances.
+func NewVisitMsgHandler(consumer *nsq.Consumer) (vmh *VisitMsgHandler) {
 	vmh = &VisitMsgHandler{
 		q:       consumer,
-		window:  cache.New(time.Second*time.Duration(window), time.Minute),
-		visitCh: make(chan *Visit, SIZE_VISIT_CH),
+		visitCh: make(chan *VisitMsg, VISIT_CH_SIZE),
 	}
 	return
 }
@@ -62,51 +66,83 @@ func (h *VisitMsgHandler) HandleMessage(message *nsq.Message) (err error) {
 		return
 	}
 
-	key := fmt.Sprintf("%d", visit.Uid)
-	if _, found := h.window.Get(key); !found {
-		h.visitCh <- visit
-	}
-	h.window.SetDefault(key, 1)
+	// Disable auto-response so that they can be handled in batch in later phase.
+	message.DisableAutoResponse()
+	h.visitCh <- &VisitMsg{msg: message, visit: visit, key: fmt.Sprintf("%d", visit.Uid)}
 	return
 }
 
+//Insertor shall be singleton for given visitCh, since it's unsafe to manage cache in multiple goroutines.
 type CkInsertor struct {
-	visitCh <-chan *Visit
+	visitCh <-chan *VisitMsg
+	window  *cache.Cache
 	db      *sqlx.DB
 	query   string
 
-	ctx    context.Context
-	cancel context.CancelFunc
+	indices []int
+	miniWin map[uint64]bool
+	ctx     context.Context
+	cancel  context.CancelFunc
 }
 
-func NewCkInsertor(visitCh <-chan *Visit, db *sqlx.DB, table string) (insertor *CkInsertor) {
+func NewCkInsertor(visitCh <-chan *VisitMsg, window int, db *sqlx.DB, table string) (insertor *CkInsertor) {
 	insertor = &CkInsertor{
 		visitCh: visitCh,
+		window:  cache.New(time.Second*time.Duration(window), time.Minute),
 		db:      db,
 		query:   fmt.Sprintf("INSERT INTO %s (uid, visit_day, visit_time, location, age, sex) VALUES (?, ?, ?, ?, ?, ?)", table),
+		indices: make([]int, 0, CK_INSERT_BATCH),
+		miniWin: make(map[uint64]bool, CK_INSERT_BATCH),
 	}
 	return
 
 }
 
-func (ins *CkInsertor) doInsert(visits []*Visit) {
-	tx, err := ins.db.Begin()
-	checkErr(err)
-	stmt, err := tx.Prepare(ins.query)
-	checkErr(err)
-
-	for _, visit := range visits {
-		visitTime := time.Unix(int64(visit.VisitTime), 0)
-		var sex uint8
-		if visit.IsMale {
-			sex = uint8(1)
+func (ins *CkInsertor) doInsert(visitMsgs []*VisitMsg) {
+	for i, visitMsg := range visitMsgs {
+		if _, found := ins.window.Get(visitMsg.key); !found {
+			if _, found2 := ins.miniWin[visitMsg.visit.Uid]; !found2 {
+				ins.indices = append(ins.indices, i)
+				ins.miniWin[visitMsg.visit.Uid] = true
+			}
 		}
-		_, err = stmt.ExecContext(ins.ctx, visit.Uid, visitTime, visitTime, visit.Location, uint8(visit.Age), sex)
-		checkErr(err)
 	}
-	err = tx.Commit()
-	log.Printf("inserted %d rows", len(visits))
-	checkErr(err)
+	// Insert rows in batch to minimize db load.
+	if len(ins.indices) != 0 {
+		tx, err := ins.db.Begin()
+		checkErr(err)
+		stmt, err := tx.Prepare(ins.query)
+		checkErr(err)
+		for _, idx := range ins.indices {
+			visitMsg := visitMsgs[idx]
+			visit := visitMsg.visit
+			visitTime := time.Unix(int64(visit.VisitTime), 0)
+			var sex uint8
+			if visit.IsMale {
+				sex = uint8(1)
+			}
+			_, err = stmt.ExecContext(ins.ctx, visit.Uid, visitTime, visitTime, visit.Location, uint8(visit.Age), sex)
+			checkErr(err)
+		}
+		err = tx.Commit()
+		checkErr(err)
+		log.Printf("inserted %d rows", len(ins.indices))
+
+		// Populate cache after commiting db insertion. Try best to ensure cache sync with db.
+		for _, idx := range ins.indices {
+			visitMsg := visitMsgs[idx]
+			ins.window.SetDefault(visitMsg.key, 1)
+		}
+		//https://stackoverflow.com/questions/16971741/how-do-you-clear-a-slice-in-go
+		//WARNING: This trick of "clear slice" only applies to basic types.
+		ins.indices = ins.indices[:0]
+		for key := range ins.miniWin {
+			delete(ins.miniWin, key)
+		}
+	}
+	for _, visitMsg := range visitMsgs {
+		visitMsg.msg.Finish()
+	}
 }
 
 func (ins *CkInsertor) StartLoop() {
@@ -115,23 +151,23 @@ func (ins *CkInsertor) StartLoop() {
 	}
 	ins.ctx, ins.cancel = context.WithCancel(context.Background())
 
-	go func(ctx context.Context, visitCh <-chan *Visit, db *sqlx.DB) {
+	go func(ctx context.Context, visitCh <-chan *VisitMsg, db *sqlx.DB) {
 		ticker := time.NewTicker(10 * time.Second)
-		visits := make([]*Visit, 0)
+		visitMsgs := make([]*VisitMsg, 0)
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case visit := <-visitCh:
-				visits = append(visits, visit)
-				if len(visits) >= CK_INSERT_BATCH {
-					ins.doInsert(visits)
-					visits = nil
+			case visitMsg := <-visitCh:
+				visitMsgs = append(visitMsgs, visitMsg)
+				if len(visitMsgs) >= CK_INSERT_BATCH {
+					ins.doInsert(visitMsgs)
+					visitMsgs = nil
 				}
 			case <-ticker.C:
-				if len(visits) != 0 {
-					ins.doInsert(visits)
-					visits = nil
+				if len(visitMsgs) != 0 {
+					ins.doInsert(visitMsgs)
+					visitMsgs = nil
 				}
 			}
 		}
@@ -177,10 +213,6 @@ func prepareClickhouse(cc *ConveyerConfig) (ckConnect *sqlx.DB, err error) {
 }
 
 func publishTestMessages(cc *ConveyerConfig) (err error) {
-	if !cc.Test {
-		return
-	}
-
 	var tpm *nsq.TopicProducerMgr
 	nc := nsq.NewConfig()
 	tpm, err = nsq.NewTopicProducerMgr([]string{cc.Topic}, nc)
@@ -191,7 +223,7 @@ func publishTestMessages(cc *ConveyerConfig) (err error) {
 	tpm.AddLookupdNodes(strings.Split(cc.NsqlookupdURLs, ","))
 	var v Visit
 	var data []byte
-	for i := 0; i < NUM_TEST_MSG; i++ {
+	for i := 0; i < cc.PubTest; i++ {
 		v.Uid = uint64(i / 3)
 		v.VisitTime = uint64(time.Now().Unix())
 		v.Location = uint64(i)
@@ -221,7 +253,8 @@ type ConveyerConfig struct {
 	ClickHouseURL  string
 	Table          string
 	Window         int  //merge time window, in seconds
-	Test           bool //publish some test messages to NSQ
+	PubTest        int  //publish some test messages to NSQ
+	PubQuit        bool //quit after publish
 }
 
 func NewConveyerConfig() (conf *ConveyerConfig) {
@@ -232,7 +265,8 @@ func NewConveyerConfig() (conf *ConveyerConfig) {
 		ClickHouseURL:  "tcp://127.0.0.1:9000?compress=true&debug=true",
 		Table:          "visits",
 		Window:         60 * 60,
-		Test:           false,
+		PubTest:        0,
+		PubQuit:        false,
 	}
 	return conf
 }
@@ -245,7 +279,8 @@ func parseConfig() (conf *ConveyerConfig) {
 	flagSet.StringVar(&conf.Channel, "channel", conf.Channel, "NSQ channel.")
 	flagSet.StringVar(&conf.ClickHouseURL, "clickhouse-url", conf.ClickHouseURL, "ClickHouse url.")
 	flagSet.IntVar(&conf.Window, "window", conf.Window, "Deduplicate time window, in seconds.")
-	flagSet.BoolVar(&conf.Test, "test", conf.Test, "Publish some test messages to NSQ.")
+	flagSet.IntVar(&conf.PubTest, "pub-test", conf.PubTest, "Publish some test messages to NSQ.")
+	flagSet.BoolVar(&conf.PubQuit, "pub-quit", conf.PubQuit, "Quit after publish.")
 	flagSet.Parse(os.Args[1:])
 	return
 }
@@ -261,22 +296,26 @@ func main() {
 	var db *sqlx.DB
 	cc := parseConfig()
 
-	err = publishTestMessages(cc)
-	checkErr(err)
+	if cc.PubTest != 0 {
+		err = publishTestMessages(cc)
+		checkErr(err)
+		if cc.PubQuit {
+			return
+		}
+	}
 
 	db, err = prepareClickhouse(cc)
 	checkErr(err)
 
 	nc := nsq.NewConfig()
-	// so that the test wont timeout from backing off
-	nc.MaxBackoffDuration = time.Millisecond * 50
+	nc.MaxInFlight = VISIT_CH_SIZE
 	nc.MaxAttempts = 5
 	q, _ := nsq.NewConsumer(cc.Topic, cc.Channel, nc)
-	h := NewVisitMsgHandler(q, cc.Window)
+	h := NewVisitMsgHandler(q)
 	q.AddHandler(h)
 	q.ConnectToNSQLookupds(strings.Split(cc.NsqlookupdURLs, ","))
 
-	ins := NewCkInsertor(h.visitCh, db, cc.Table)
+	ins := NewCkInsertor(h.visitCh, cc.Window, db, cc.Table)
 	ins.StartLoop()
 
 	sc := make(chan os.Signal, 1)
