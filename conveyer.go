@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
 	runPprof "runtime/pprof"
@@ -18,6 +17,7 @@ import (
 	"github.com/kshvakov/clickhouse"
 	"github.com/patrickmn/go-cache"
 	"github.com/pkg/errors"
+	log "github.com/sirupsen/logrus"
 	"github.com/youzan/go-nsq"
 	"golang.org/x/net/context"
 )
@@ -56,7 +56,7 @@ func (h *VisitMsgHandler) LogFailedMessage(message *nsq.Message) {
 
 func (h *VisitMsgHandler) HandleMessage(message *nsq.Message) (err error) {
 	h.messagesReceived++
-	log.Printf("received message %v: %v %v", h.messagesReceived, nsq.GetNewMessageID(message.ID[:]), string(message.Body))
+	log.Debugf("received message %v: %v %v", h.messagesReceived, nsq.GetNewMessageID(message.ID[:]), string(message.Body))
 
 	//protobuf decode
 	visit := &Visit{}
@@ -126,7 +126,7 @@ func (ins *CkInsertor) doInsert(visitMsgs []*VisitMsg) {
 		}
 		err = tx.Commit()
 		checkErr(err)
-		log.Printf("inserted %d rows", len(ins.indices))
+		log.Debugf("inserted %d rows", len(ins.indices))
 
 		// Populate cache after commiting db insertion. Try best to ensure cache sync with db.
 		for _, idx := range ins.indices {
@@ -243,6 +243,7 @@ func publishTestMessages(cc *ConveyerConfig) (err error) {
 		}
 	}
 	tpm.Stop()
+	log.Debugf("published %d test messages", cc.PubTest)
 	return
 }
 
@@ -255,6 +256,7 @@ type ConveyerConfig struct {
 	Window         int  //merge time window, in seconds
 	PubTest        int  //publish some test messages to NSQ
 	PubQuit        bool //quit after publish
+	Debug          bool
 }
 
 func NewConveyerConfig() (conf *ConveyerConfig) {
@@ -267,6 +269,7 @@ func NewConveyerConfig() (conf *ConveyerConfig) {
 		Window:         60 * 60,
 		PubTest:        0,
 		PubQuit:        false,
+		Debug:          false,
 	}
 	return conf
 }
@@ -277,10 +280,11 @@ func parseConfig() (conf *ConveyerConfig) {
 	flagSet.StringVar(&conf.NsqlookupdURLs, "nsqlookupd-urls", conf.NsqlookupdURLs, "List of URLs of nsqlookupd.")
 	flagSet.StringVar(&conf.Topic, "topic", conf.Topic, "NSQ topic.")
 	flagSet.StringVar(&conf.Channel, "channel", conf.Channel, "NSQ channel.")
-	flagSet.StringVar(&conf.ClickHouseURL, "clickhouse-url", conf.ClickHouseURL, "ClickHouse url.")
+	flagSet.StringVar(&conf.ClickHouseURL, "clickhouse-url", conf.ClickHouseURL, "ClickHouse url. Use url parameter \"debug=true\" to enable the clickhouse client's log.")
 	flagSet.IntVar(&conf.Window, "window", conf.Window, "Deduplicate time window, in seconds.")
 	flagSet.IntVar(&conf.PubTest, "pub-test", conf.PubTest, "Publish some test messages to NSQ.")
 	flagSet.BoolVar(&conf.PubQuit, "pub-quit", conf.PubQuit, "Quit after publish.")
+	flagSet.BoolVar(&conf.Debug, "debug", conf.Debug, "Set log level to DEBUG.")
 	flagSet.Parse(os.Args[1:])
 	return
 }
@@ -296,6 +300,15 @@ func main() {
 	var db *sqlx.DB
 	cc := parseConfig()
 
+	formatter := &log.TextFormatter{
+		FullTimestamp: true,
+	}
+	log.SetFormatter(formatter)
+	if cc.Debug {
+		log.SetLevel(log.DebugLevel)
+		//TODO: set NSQ consumer log level to nsq.LogLevelDebug
+	}
+
 	if cc.PubTest != 0 {
 		err = publishTestMessages(cc)
 		checkErr(err)
@@ -310,6 +323,7 @@ func main() {
 	nc := nsq.NewConfig()
 	nc.MaxInFlight = VISIT_CH_SIZE
 	nc.MaxAttempts = 5
+
 	q, _ := nsq.NewConsumer(cc.Topic, cc.Channel, nc)
 	h := NewVisitMsgHandler(q)
 	q.AddHandler(h)
@@ -326,18 +340,18 @@ func main() {
 		syscall.SIGUSR1)
 	for {
 		sig := <-sc
-		log.Printf("got signal %s", sig.String())
+		log.Infof("got signal %s", sig.String())
 		switch sig {
 		case syscall.SIGUSR1:
 			buf := bytes.NewBuffer([]byte{})
 			_ = runPprof.Lookup("goroutine").WriteTo(buf, 1)
-			log.Printf(buf.String())
+			log.Infof(buf.String())
 			continue
 		default:
 			ins.StopLoop()
 			q.Stop()
 			<-q.StopChan
-			log.Printf("exit: bye :-).")
+			log.Infof("exit: bye :-).")
 			os.Exit(1)
 		}
 	}
