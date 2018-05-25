@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"runtime"
 	runPprof "runtime/pprof"
 	"strings"
 	"syscall"
@@ -20,6 +21,14 @@ import (
 	log "github.com/sirupsen/logrus"
 	"github.com/youzan/go-nsq"
 	"golang.org/x/net/context"
+)
+
+// report version and Git SHA, inspired by github.com/coreos/etcd/version/version.go
+var (
+	Version = "1.0-SNAPSHOT"
+	// GitSHA and BuildTime will be set during build
+	GitSHA    = "Not provided (use ./build.sh instead of go build)"
+	BuildTime = "Not provided (use ./build.sh instead of go build)"
 )
 
 const (
@@ -308,6 +317,12 @@ func main() {
 		log.SetLevel(log.DebugLevel)
 		//TODO: set NSQ consumer log level to nsq.LogLevelDebug
 	}
+
+	log.Infof("conveyer Version: %s", Version)
+	log.Infof("Git SHA: %s", GitSHA)
+	log.Infof("BuildTime: %s", BuildTime)
+	log.Infof("Go Version: %s", runtime.Version())
+	log.Infof("Go OS/Arch: %s/%s", runtime.GOOS, runtime.GOARCH)
 
 	if cc.PubTest != 0 {
 		err = publishTestMessages(cc)
