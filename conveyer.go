@@ -286,6 +286,13 @@ func NewConveyerConfig() (conf *ConveyerConfig) {
 func parseConfig() (conf *ConveyerConfig) {
 	conf = NewConveyerConfig()
 	flagSet := flag.NewFlagSet("conveyer", flag.ExitOnError)
+	flagSet.Usage = func() {
+		out := flagSet.Output()
+		fmt.Fprintf(out, "Git SHA: %s\n", GitSHA)
+		fmt.Fprintf(out, "BuildTime: %s\n", BuildTime)
+		fmt.Fprintf(out, "Usage of %s:\n", os.Args[0])
+		flagSet.PrintDefaults()
+	}
 	flagSet.StringVar(&conf.NsqlookupdURLs, "nsqlookupd-urls", conf.NsqlookupdURLs, "List of URLs of nsqlookupd.")
 	flagSet.StringVar(&conf.Topic, "topic", conf.Topic, "NSQ topic.")
 	flagSet.StringVar(&conf.Channel, "channel", conf.Channel, "NSQ channel.")
