@@ -286,13 +286,6 @@ func NewConveyerConfig() (conf *ConveyerConfig) {
 func parseConfig() (conf *ConveyerConfig) {
 	conf = NewConveyerConfig()
 	flagSet := flag.NewFlagSet("conveyer", flag.ExitOnError)
-	flagSet.Usage = func() {
-		out := flagSet.Output()
-		fmt.Fprintf(out, "Git SHA: %s\n", GitSHA)
-		fmt.Fprintf(out, "BuildTime: %s\n", BuildTime)
-		fmt.Fprintf(out, "Usage of %s:\n", os.Args[0])
-		flagSet.PrintDefaults()
-	}
 	flagSet.StringVar(&conf.NsqlookupdURLs, "nsqlookupd-urls", conf.NsqlookupdURLs, "List of URLs of nsqlookupd.")
 	flagSet.StringVar(&conf.Topic, "topic", conf.Topic, "NSQ topic.")
 	flagSet.StringVar(&conf.Channel, "channel", conf.Channel, "NSQ channel.")
@@ -301,7 +294,17 @@ func parseConfig() (conf *ConveyerConfig) {
 	flagSet.IntVar(&conf.PubTest, "pub-test", conf.PubTest, "Publish some test messages to NSQ.")
 	flagSet.BoolVar(&conf.PubQuit, "pub-quit", conf.PubQuit, "Quit after publish.")
 	flagSet.BoolVar(&conf.Debug, "debug", conf.Debug, "Set log level to DEBUG.")
+	showVer := flagSet.Bool("version", false, "Show version and quit.")
 	flagSet.Parse(os.Args[1:])
+	if *showVer {
+		out := flagSet.Output()
+		fmt.Fprintf(out, "conveyer Version: %s\n", Version)
+		fmt.Fprintf(out, "Git SHA: %s\n", GitSHA)
+		fmt.Fprintf(out, "BuildTime: %s\n", BuildTime)
+		fmt.Fprintf(out, "Go Version: %s\n", runtime.Version())
+		fmt.Fprintf(out, "Go OS/Arch: %s/%s\n", runtime.GOOS, runtime.GOARCH)
+		os.Exit(0)
+	}
 	return
 }
 
@@ -324,12 +327,6 @@ func main() {
 		log.SetLevel(log.DebugLevel)
 		//TODO: set NSQ consumer log level to nsq.LogLevelDebug
 	}
-
-	log.Infof("conveyer Version: %s", Version)
-	log.Infof("Git SHA: %s", GitSHA)
-	log.Infof("BuildTime: %s", BuildTime)
-	log.Infof("Go Version: %s", runtime.Version())
-	log.Infof("Go OS/Arch: %s/%s", runtime.GOOS, runtime.GOARCH)
 
 	if cc.PubTest != 0 {
 		err = publishTestMessages(cc)

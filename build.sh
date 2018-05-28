@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
 
-GIT_SHA=$(git rev-parse HEAD || echo "GitNotFound")
-BUILD_TIME=$(date --rfc-3339=seconds | tr ' ' 'T')
-go build -ldflags "-X main.GitSHA=${GIT_SHA} -X main.BuildTime=${BUILD_TIME}"
+GIT_SHA=$(git rev-parse --short HEAD || echo "GitNotFound")
+BUILD_TIME=$(date --iso-8601=seconds)
+CGO_ENABLED=0 go build -ldflags "-X main.GitSHA=${GIT_SHA} -X main.BuildTime=${BUILD_TIME}"
