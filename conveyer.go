@@ -154,39 +154,25 @@ func (ins *CkInsertor) doInsert(visitMsgs []*VisitMsg) {
 	}
 }
 
-func (ins *CkInsertor) StartLoop() {
-	if ins.ctx != nil {
-		return
-	}
-	ins.ctx, ins.cancel = context.WithCancel(context.Background())
-
-	go func(ctx context.Context, visitCh <-chan *VisitMsg, db *sqlx.DB) {
-		ticker := time.NewTicker(10 * time.Second)
-		visitMsgs := make([]*VisitMsg, 0)
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case visitMsg := <-visitCh:
-				visitMsgs = append(visitMsgs, visitMsg)
-				if len(visitMsgs) >= CK_INSERT_BATCH {
-					ins.doInsert(visitMsgs)
-					visitMsgs = nil
-				}
-			case <-ticker.C:
-				if len(visitMsgs) != 0 {
-					ins.doInsert(visitMsgs)
-					visitMsgs = nil
-				}
+func (ins *CkInsertor) Serve(ctx context.Context) {
+	ticker := time.NewTicker(10 * time.Second)
+	visitMsgs := make([]*VisitMsg, 0)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case visitMsg := <-ins.visitCh:
+			visitMsgs = append(visitMsgs, visitMsg)
+			if len(visitMsgs) >= CK_INSERT_BATCH {
+				ins.doInsert(visitMsgs)
+				visitMsgs = nil
+			}
+		case <-ticker.C:
+			if len(visitMsgs) != 0 {
+				ins.doInsert(visitMsgs)
+				visitMsgs = nil
 			}
 		}
-	}(ins.ctx, ins.visitCh, ins.db)
-}
-
-func (ins *CkInsertor) StopLoop() {
-	if ins.ctx != nil {
-		ins.cancel()
-		ins.ctx = nil
 	}
 }
 
@@ -349,7 +335,8 @@ func main() {
 	q.ConnectToNSQLookupds(strings.Split(cc.NsqlookupdURLs, ","))
 
 	ins := NewCkInsertor(h.visitCh, cc.Window, db, cc.Table)
-	ins.StartLoop()
+	ctx, cancel := context.WithCancel(context.Background())
+	ins.Serve(ctx)
 
 	sc := make(chan os.Signal, 1)
 	signal.Notify(sc,
@@ -367,7 +354,7 @@ func main() {
 			log.Infof(buf.String())
 			continue
 		default:
-			ins.StopLoop()
+			cancel()
 			q.Stop()
 			<-q.StopChan
 			log.Infof("exit: bye :-).")
