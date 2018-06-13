@@ -264,7 +264,7 @@ func NewConveyerConfig() (conf *ConveyerConfig) {
 		NsqlookupdURLs: "http://127.0.0.1:4161",
 		Topic:          "visits",
 		Channel:        "ch",
-		ClickHouseURL:  "tcp://127.0.0.1:9000?compress=true&debug=true",
+		ClickHouseURL:  "tcp://127.0.0.1:9000",
 		Table:          "visits",
 		Window:         60 * 60,
 		PubTest:        0,
