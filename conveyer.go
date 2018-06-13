@@ -32,8 +32,10 @@ var (
 )
 
 const (
-	CK_INSERT_BATCH int = 1000
-	VISIT_CH_SIZE   int = 2 * CK_INSERT_BATCH
+	POSITION_INGRESS uint32 = 0
+	POSITION_EGRESS  uint32 = 1
+	CK_INSERT_BATCH  int    = 1000
+	VISIT_CH_SIZE    int    = 2 * CK_INSERT_BATCH
 )
 
 type VisitMsgHandler struct {
@@ -47,7 +49,6 @@ type VisitMsgHandler struct {
 type VisitMsg struct {
 	msg   *nsq.Message
 	visit *Visit
-	key   string
 }
 
 //There can be multiple VisitMsgHandler instances.
@@ -77,7 +78,7 @@ func (h *VisitMsgHandler) HandleMessage(message *nsq.Message) (err error) {
 
 	// Disable auto-response so that they can be handled in batch in later phase.
 	message.DisableAutoResponse()
-	h.visitCh <- &VisitMsg{msg: message, visit: visit, key: fmt.Sprintf("%d", visit.Uid)}
+	h.visitCh <- &VisitMsg{msg: message, visit: visit}
 	return
 }
 
@@ -87,11 +88,6 @@ type CkInsertor struct {
 	window  *cache.Cache
 	db      *sqlx.DB
 	query   string
-
-	indices []int
-	miniWin map[uint64]bool
-	ctx     context.Context
-	cancel  context.CancelFunc
 }
 
 func NewCkInsertor(visitCh <-chan *VisitMsg, window int, db *sqlx.DB, table string) (insertor *CkInsertor) {
@@ -99,56 +95,57 @@ func NewCkInsertor(visitCh <-chan *VisitMsg, window int, db *sqlx.DB, table stri
 		visitCh: visitCh,
 		window:  cache.New(time.Second*time.Duration(window), time.Minute),
 		db:      db,
-		query:   fmt.Sprintf("INSERT INTO %s (uid, visit_day, visit_time, location, age, sex) VALUES (?, ?, ?, ?, ?, ?)", table),
-		indices: make([]int, 0, CK_INSERT_BATCH),
-		miniWin: make(map[uint64]bool, CK_INSERT_BATCH),
+		query:   fmt.Sprintf("INSERT INTO %s (uid, visit_day, visit_time, shop, duration, position, age, sex) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", table),
 	}
 	return
 
 }
 
-func (ins *CkInsertor) doInsert(visitMsgs []*VisitMsg) {
-	for i, visitMsg := range visitMsgs {
-		if _, found := ins.window.Get(visitMsg.key); !found {
-			if _, found2 := ins.miniWin[visitMsg.visit.Uid]; !found2 {
-				ins.indices = append(ins.indices, i)
-				ins.miniWin[visitMsg.visit.Uid] = true
-			}
-		}
-	}
+func (ins *CkInsertor) doInsert(ctx context.Context, visitMsgs []*VisitMsg) {
+	tx, err := ins.db.Begin()
+	checkErr(err)
+	stmt, err := tx.Prepare(ins.query)
+	checkErr(err)
 	// Insert rows in batch to minimize db load.
-	if len(ins.indices) != 0 {
-		tx, err := ins.db.Begin()
-		checkErr(err)
-		stmt, err := tx.Prepare(ins.query)
-		checkErr(err)
-		for _, idx := range ins.indices {
-			visitMsg := visitMsgs[idx]
-			visit := visitMsg.visit
-			visitTime := time.Unix(int64(visit.VisitTime), 0)
+	var prevVisitItf interface{}
+	var prevVisit *Visit
+	var found bool
+	var inserted int
+	for _, visitMsg := range visitMsgs {
+		var needInsert bool
+		var duration uint64
+		visit := visitMsg.visit
+		visitKey := fmt.Sprintf("%d-%d", visit.Uid, visit.Shop)
+		prevVisitItf, found = ins.window.Get(visitKey)
+		if found {
+			prevVisit = prevVisitItf.(*Visit)
+			if prevVisit.Position != visit.Position {
+				needInsert = true
+				if prevVisit.Position == POSITION_INGRESS &&
+					visit.Position == POSITION_EGRESS &&
+					visit.VisitTime > prevVisit.VisitTime {
+					duration = visit.VisitTime - prevVisit.VisitTime
+				}
+			}
+		} else {
+			needInsert = true
+		}
+
+		if needInsert {
 			var sex uint8
 			if visit.IsMale {
 				sex = uint8(1)
 			}
-			_, err = stmt.ExecContext(ins.ctx, visit.Uid, visitTime, visitTime, visit.Location, uint8(visit.Age), sex)
+			_, err = stmt.ExecContext(ctx, visit.Uid, int64(visit.VisitTime), int64(visit.VisitTime), visit.Shop, duration, visit.Position, uint8(visit.Age), sex)
 			checkErr(err)
-		}
-		err = tx.Commit()
-		checkErr(err)
-		log.Debugf("inserted %d rows", len(ins.indices))
-
-		// Populate cache after commiting db insertion. Try best to ensure cache sync with db.
-		for _, idx := range ins.indices {
-			visitMsg := visitMsgs[idx]
-			ins.window.SetDefault(visitMsg.key, 1)
-		}
-		//https://stackoverflow.com/questions/16971741/how-do-you-clear-a-slice-in-go
-		//WARNING: This trick of "clear slice" only applies to basic types.
-		ins.indices = ins.indices[:0]
-		for key := range ins.miniWin {
-			delete(ins.miniWin, key)
+			inserted++
+			ins.window.SetDefault(visitKey, visitMsg.visit)
 		}
 	}
+	err = tx.Commit()
+	checkErr(err)
+	log.Debugf("got %d visit messages from NSQ, inserted %d rows to ClickHouse", len(visitMsgs), inserted)
+
 	for _, visitMsg := range visitMsgs {
 		visitMsg.msg.Finish()
 	}
@@ -164,12 +161,12 @@ func (ins *CkInsertor) Serve(ctx context.Context) {
 		case visitMsg := <-ins.visitCh:
 			visitMsgs = append(visitMsgs, visitMsg)
 			if len(visitMsgs) >= CK_INSERT_BATCH {
-				ins.doInsert(visitMsgs)
+				ins.doInsert(ctx, visitMsgs)
 				visitMsgs = nil
 			}
 		case <-ticker.C:
 			if len(visitMsgs) != 0 {
-				ins.doInsert(visitMsgs)
+				ins.doInsert(ctx, visitMsgs)
 				visitMsgs = nil
 			}
 		}
@@ -194,7 +191,9 @@ func prepareClickhouse(cc *ConveyerConfig) (ckConnect *sqlx.DB, err error) {
 		uid UInt64,
 		visit_day Date,
 		visit_time DateTime,
-		location UInt64,
+		shop UInt64,
+		duration UInt64,
+		position UInt32,
 		age UInt8,
 		sex UInt8
 	) engine=MergeTree(visit_day, intHash32(uid), (intHash32(uid), visit_day), 8192);`
@@ -218,12 +217,18 @@ func publishTestMessages(cc *ConveyerConfig) (err error) {
 	tpm.AddLookupdNodes(strings.Split(cc.NsqlookupdURLs, ","))
 	var v Visit
 	var data []byte
+	now := uint64(time.Now().Unix())
 	for i := 0; i < cc.PubTest; i++ {
-		v.Uid = uint64(i / 3)
-		v.VisitTime = uint64(time.Now().Unix())
-		v.Location = uint64(i)
-		v.Age = uint32(i)
-		if i&0x1 == 0 {
+		v.Uid = uint64(i / 10)
+		v.VisitTime = now + uint64(i)
+		v.Shop = v.Uid
+		if i&0x3 == 0 {
+			v.Position = POSITION_EGRESS
+		} else {
+			v.Position = POSITION_INGRESS
+		}
+		v.Age = uint32(v.Uid)
+		if v.Uid&0x1 == 0 {
 			v.IsMale = false
 		} else {
 			v.IsMale = true

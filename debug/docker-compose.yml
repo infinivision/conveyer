@@ -1,0 +1,86 @@
+# refers to https://docs.docker.com/compose/compose-file/
+version: '3.2'
+services:
+  nsqlookupd:
+    image: "deepfabric/nsq"
+    user: "1000"
+    network_mode: "host"
+    volumes:
+      - type: bind
+        source: /opt/data/nsq
+        target: /data
+      - type: bind
+        source: /opt/log
+        target: /log
+      - type: bind
+        source: /opt/config
+        target: /config
+      - type: bind
+        source: /etc/localtime
+        target: /etc/localtime
+    restart: on-failure
+    command: "/bin/nsqlookupd --config=/config/nsqlookupd.cfg --log-dir=/log --etcd.name nsqlookupd2 --etcd.data-dir /data --etcd.initial-advertise-peer-urls http://127.0.0.1:2380 --etcd.listen-peer-urls http://127.0.0.1:2380 --etcd.listen-client-urls http://127.0.0.1:2379 --etcd.advertise-client-urls http://127.0.0.1:2379 --etcd.initial-cluster-token etcd-cluster-1 --etcd.initial-cluster nsqlookupd2=http://127.0.0.1:2380 --etcd.initial-cluster-state new --etcd.debug true"
+
+  nsqadmin:
+    image: "deepfabric/nsq"
+    user: "1000"
+    network_mode: "host"
+    volumes:
+      - type: bind
+        source: /opt/data/nsq
+        target: /data
+      - type: bind
+        source: /opt/log
+        target: /log
+      - type: bind
+        source: /opt/config
+        target: /config
+      - type: bind
+        source: /etc/localtime
+        target: /etc/localtime
+    restart: on-failure
+    command: "/bin/nsqadmin --config=/config/nsqadmin.cfg --log-dir=/log"
+
+  nsqd:
+    image: "deepfabric/nsq"
+    user: "1000"
+    network_mode: "host"
+    volumes:
+      - type: bind
+        source: /opt/data/nsq
+        target: /data
+      - type: bind
+        source: /opt/log
+        target: /log
+      - type: bind
+        source: /opt/config
+        target: /config
+      - type: bind
+        source: /etc/localtime
+        target: /etc/localtime
+    restart: on-failure
+    command: "/bin/nsqd --config=/config/nsqd.cfg --log-dir=/log"
+
+  clickhouse:
+    image: "yandex/clickhouse-server"
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    network_mode: "host"
+    volumes:
+      - type: bind
+        source: /etc/localtime
+        target: /etc/localtime
+    restart: on-failure
+
+  conveyer:
+    image: "infinivision/conveyer"
+    user: "1000"
+    network_mode: "host"
+    volumes:
+      - type: bind
+        source: /etc/localtime
+        target: /etc/localtime
+    restart: on-failure
+    command: "--nsqlookupd-urls http://127.0.0.1:4161"

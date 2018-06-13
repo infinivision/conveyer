@@ -11,7 +11,8 @@ option (gogoproto.goproto_getters_all) = false;
 message Visit {
 	uint64     Uid       = 1;
 	uint64     VisitTime = 2;
-	uint64     Location  = 3;
-	uint32     Age       = 4;
-    bool       IsMale    = 5;
+	uint64     Shop      = 3;
+	uint32     Position  = 4;
+	uint32     Age       = 5;
+	bool       IsMale    = 6;
 }
