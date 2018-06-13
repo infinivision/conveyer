@@ -34,7 +34,7 @@ var (
 const (
 	POSITION_INGRESS uint32 = 0
 	POSITION_EGRESS  uint32 = 1
-	CK_INSERT_BATCH  int    = 1000
+	CK_INSERT_BATCH  int    = 100
 	VISIT_CH_SIZE    int    = 2 * CK_INSERT_BATCH
 )
 
@@ -43,19 +43,14 @@ type VisitMsgHandler struct {
 	messagesSent     int
 	messagesReceived int
 	messagesFailed   int
-	visitCh          chan *VisitMsg
-}
-
-type VisitMsg struct {
-	msg   *nsq.Message
-	visit *Visit
+	visitCh          chan *Visit
 }
 
 //There can be multiple VisitMsgHandler instances.
 func NewVisitMsgHandler(consumer *nsq.Consumer) (vmh *VisitMsgHandler) {
 	vmh = &VisitMsgHandler{
 		q:       consumer,
-		visitCh: make(chan *VisitMsg, VISIT_CH_SIZE),
+		visitCh: make(chan *Visit, VISIT_CH_SIZE),
 	}
 	return
 }
@@ -76,21 +71,19 @@ func (h *VisitMsgHandler) HandleMessage(message *nsq.Message) (err error) {
 		return
 	}
 
-	// Disable auto-response so that they can be handled in batch in later phase.
-	message.DisableAutoResponse()
-	h.visitCh <- &VisitMsg{msg: message, visit: visit}
+	h.visitCh <- visit
 	return
 }
 
 //Insertor shall be singleton for given visitCh, since it's unsafe to manage cache in multiple goroutines.
 type CkInsertor struct {
-	visitCh <-chan *VisitMsg
+	visitCh <-chan *Visit
 	window  *cache.Cache
 	db      *sqlx.DB
 	query   string
 }
 
-func NewCkInsertor(visitCh <-chan *VisitMsg, window int, db *sqlx.DB, table string) (insertor *CkInsertor) {
+func NewCkInsertor(visitCh <-chan *Visit, window int, db *sqlx.DB, table string) (insertor *CkInsertor) {
 	insertor = &CkInsertor{
 		visitCh: visitCh,
 		window:  cache.New(time.Second*time.Duration(window), time.Minute),
@@ -101,7 +94,7 @@ func NewCkInsertor(visitCh <-chan *VisitMsg, window int, db *sqlx.DB, table stri
 
 }
 
-func (ins *CkInsertor) doInsert(ctx context.Context, visitMsgs []*VisitMsg) {
+func (ins *CkInsertor) doInsert(ctx context.Context, visits []*Visit) {
 	tx, err := ins.db.Begin()
 	checkErr(err)
 	stmt, err := tx.Prepare(ins.query)
@@ -111,10 +104,9 @@ func (ins *CkInsertor) doInsert(ctx context.Context, visitMsgs []*VisitMsg) {
 	var prevVisit *Visit
 	var found bool
 	var inserted int
-	for _, visitMsg := range visitMsgs {
+	for _, visit := range visits {
 		var needInsert bool
 		var duration uint64
-		visit := visitMsg.visit
 		visitKey := fmt.Sprintf("%d-%d", visit.Uid, visit.Shop)
 		prevVisitItf, found = ins.window.Get(visitKey)
 		if found {
@@ -139,21 +131,17 @@ func (ins *CkInsertor) doInsert(ctx context.Context, visitMsgs []*VisitMsg) {
 			_, err = stmt.ExecContext(ctx, visit.Uid, int64(visit.VisitTime), int64(visit.VisitTime), visit.Shop, duration, visit.Position, uint8(visit.Age), sex)
 			checkErr(err)
 			inserted++
-			ins.window.SetDefault(visitKey, visitMsg.visit)
+			ins.window.SetDefault(visitKey, visit)
 		}
 	}
 	err = tx.Commit()
 	checkErr(err)
-	log.Debugf("got %d visit messages from NSQ, inserted %d rows to ClickHouse", len(visitMsgs), inserted)
-
-	for _, visitMsg := range visitMsgs {
-		visitMsg.msg.Finish()
-	}
+	log.Debugf("got %d visits from NSQ, inserted %d rows to ClickHouse", len(visits), inserted)
 }
 
 func (ins *CkInsertor) Serve(ctx context.Context) {
-	ticker := time.NewTicker(10 * time.Second)
-	visitMsgs := make([]*VisitMsg, 0)
+	ticker := time.NewTicker(5 * time.Second)
+	visitMsgs := make([]*Visit, 0)
 	for {
 		select {
 		case <-ctx.Done():
@@ -331,7 +319,7 @@ func main() {
 	checkErr(err)
 
 	nc := nsq.NewConfig()
-	nc.MaxInFlight = VISIT_CH_SIZE
+	nc.EnableOrdered = true
 	nc.MaxAttempts = 5
 
 	q, _ := nsq.NewConsumer(cc.Topic, cc.Channel, nc)
