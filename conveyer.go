@@ -269,6 +269,7 @@ func parseConfig() (conf *ConveyerConfig) {
 	flagSet.StringVar(&conf.Topic, "topic", conf.Topic, "NSQ topic.")
 	flagSet.StringVar(&conf.Channel, "channel", conf.Channel, "NSQ channel.")
 	flagSet.StringVar(&conf.ClickHouseURL, "clickhouse-url", conf.ClickHouseURL, "ClickHouse url. Use url parameter \"debug=true\" to enable the clickhouse client's log.")
+	flagSet.StringVar(&conf.Table, "table", conf.Table, "ClickHouse table.")
 	flagSet.IntVar(&conf.Window, "window", conf.Window, "Deduplicate time window, in seconds.")
 	flagSet.IntVar(&conf.PubTest, "pub-test", conf.PubTest, "Publish some test messages to NSQ.")
 	flagSet.BoolVar(&conf.PubQuit, "pub-quit", conf.PubQuit, "Quit after publish.")
