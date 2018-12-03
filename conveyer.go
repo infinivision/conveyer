@@ -309,16 +309,17 @@ func main() {
 			select {
 			case <-ctx.Done():
 				return
-			case message, ok := <-consumer.Messages():
+			case msg, ok := <-consumer.Messages():
 				if ok {
 					//protobuf decode
 					visit := &Visit{}
-					if err = visit.Unmarshal(message.Value); err != nil {
+					if err = visit.Unmarshal(msg.Value); err != nil {
 						err = errors.Wrapf(err, "")
 						log.Error("got error: %+v", err)
 						continue
 					}
 					visitCh <- visit
+					consumer.MarkOffset(msg, "") // mark message as processed
 				}
 			case err := <-consumer.Errors():
 				err = errors.Wrapf(err, "")
