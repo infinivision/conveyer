@@ -2,6 +2,7 @@ module github.com/infinivision/conveyer
 
 require (
 	github.com/Shopify/sarama v1.19.0
+	github.com/bsm/sarama-cluster v2.1.15+incompatible
 	github.com/eapache/go-resiliency v1.1.0 // indirect
 	github.com/eapache/go-xerial-snappy v0.0.0-20180814174437-776d5712da21 // indirect
 	github.com/eapache/queue v1.1.0 // indirect

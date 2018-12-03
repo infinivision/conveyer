@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Shopify/sarama"
+	cluster "github.com/bsm/sarama-cluster"
 	"github.com/jmoiron/sqlx"
 	"github.com/kshvakov/clickhouse"
 	"github.com/patrickmn/go-cache"
@@ -292,31 +293,38 @@ func main() {
 
 	visitCh := make(chan *Visit, 10000)
 
-	var consumer sarama.Consumer
-	var pc sarama.PartitionConsumer
-	consumer, err = sarama.NewConsumer(strings.Split(cc.MqAddrs, ","), nil)
-	checkErr(err)
-	pc, err = consumer.ConsumePartition("visits3", 0, 1024) //TODO: use privious offset?
+	// init (custom) config, enable errors and notifications
+	config := cluster.NewConfig()
+	config.Consumer.Return.Errors = true
+	config.Group.Return.Notifications = true
+
+	// init consumer
+	brokers := strings.Split(cc.MqAddrs, ",")
+	topics := []string{"visits3"}
+	consumer, err := cluster.NewConsumer(brokers, "my-consumer-group", topics, config)
 	checkErr(err)
 	go func() {
+		defer consumer.Close()
 		for {
 			select {
 			case <-ctx.Done():
-				pc.Close()
-				consumer.Close()
 				return
-			case message := <-pc.Messages():
-				//protobuf decode
-				visit := &Visit{}
-				if err = visit.Unmarshal(message.Value); err != nil {
-					err = errors.Wrapf(err, "")
-					log.Error("got error: %+v", err)
-					continue
+			case message, ok := <-consumer.Messages():
+				if ok {
+					//protobuf decode
+					visit := &Visit{}
+					if err = visit.Unmarshal(message.Value); err != nil {
+						err = errors.Wrapf(err, "")
+						log.Error("got error: %+v", err)
+						continue
+					}
+					visitCh <- visit
 				}
-				visitCh <- visit
-			case pce := <-pc.Errors():
-				err = errors.Wrapf(pce.Err, "topic %v, partition %v, ", pce.Topic, pce.Partition)
+			case err := <-consumer.Errors():
+				err = errors.Wrapf(err, "")
 				log.Error("got error: %+v", err)
+			case ntf := <-consumer.Notifications():
+				log.Infof("Rebalanced: %+v", ntf)
 			}
 		}
 	}()
