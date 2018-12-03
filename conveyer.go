@@ -14,12 +14,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Shopify/sarama"
 	"github.com/jmoiron/sqlx"
 	"github.com/kshvakov/clickhouse"
 	"github.com/patrickmn/go-cache"
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
-	"github.com/youzan/go-nsq"
 	"golang.org/x/net/context"
 )
 
@@ -37,43 +37,6 @@ const (
 	CK_INSERT_BATCH  int    = 100
 	VISIT_CH_SIZE    int    = 2 * CK_INSERT_BATCH
 )
-
-type VisitMsgHandler struct {
-	q                *nsq.Consumer
-	messagesSent     int
-	messagesReceived int
-	messagesFailed   int
-	visitCh          chan *Visit
-}
-
-//There can be multiple VisitMsgHandler instances.
-func NewVisitMsgHandler(consumer *nsq.Consumer) (vmh *VisitMsgHandler) {
-	vmh = &VisitMsgHandler{
-		q:       consumer,
-		visitCh: make(chan *Visit, VISIT_CH_SIZE),
-	}
-	return
-}
-
-func (h *VisitMsgHandler) LogFailedMessage(message *nsq.Message) {
-	h.messagesFailed++
-}
-
-func (h *VisitMsgHandler) HandleMessage(message *nsq.Message) (err error) {
-	h.messagesReceived++
-	log.Debugf("received message %v: %v %v", h.messagesReceived, nsq.GetNewMessageID(message.ID[:]), string(message.Body))
-
-	//protobuf decode
-	visit := &Visit{}
-	if err = visit.Unmarshal(message.Body); err != nil {
-		h.messagesFailed++
-		err = errors.Wrapf(err, "")
-		return
-	}
-
-	h.visitCh <- visit
-	return
-}
 
 //Insertor shall be singleton for given visitCh, since it's unsafe to manage cache in multiple goroutines.
 type CkInsertor struct {
@@ -195,14 +158,16 @@ func prepareClickhouse(cc *ConveyerConfig) (ckConnect *sqlx.DB, err error) {
 }
 
 func publishTestMessages(cc *ConveyerConfig) (err error) {
-	var tpm *nsq.TopicProducerMgr
-	nc := nsq.NewConfig()
-	tpm, err = nsq.NewTopicProducerMgr([]string{cc.Topic}, nc)
+	var producer sarama.SyncProducer
+	config := sarama.NewConfig()
+	config.Producer.RequiredAcks = sarama.WaitForAll
+	config.Producer.Retry.Max = 10
+	config.Producer.Return.Successes = true
+	producer, err = sarama.NewSyncProducer(strings.Split(cc.MqAddrs, ","), config)
 	if err != nil {
 		err = errors.Wrapf(err, "")
 		return
 	}
-	tpm.AddLookupdNodes(strings.Split(cc.NsqlookupdURLs, ","))
 	var v Visit
 	var data []byte
 	now := uint64(time.Now().Unix())
@@ -225,39 +190,43 @@ func publishTestMessages(cc *ConveyerConfig) (err error) {
 			err = errors.Wrapf(err, "")
 			return
 		}
-		if err = tpm.Publish(cc.Topic, data); err != nil {
+		_, _, err = producer.SendMessage(&sarama.ProducerMessage{
+			Topic: cc.Topic,
+			Value: sarama.ByteEncoder(data),
+		})
+		if err != nil {
 			err = errors.Wrapf(err, "")
 			return
 		}
 	}
-	tpm.Stop()
+	producer.Close()
 	log.Debugf("published %d test messages", cc.PubTest)
 	return
 }
 
 type ConveyerConfig struct {
-	NsqlookupdURLs string
-	Topic          string
-	Channel        string
-	ClickHouseURL  string
-	Table          string
-	Window         int  //merge time window, in seconds
-	PubTest        int  //publish some test messages to NSQ
-	PubQuit        bool //quit after publish
-	Debug          bool
+	MqAddrs       string
+	Topic         string
+	Channel       string
+	ClickHouseURL string
+	Table         string
+	Window        int  //merge time window, in seconds
+	PubTest       int  //publish some test messages to NSQ
+	PubQuit       bool //quit after publish
+	Debug         bool
 }
 
 func NewConveyerConfig() (conf *ConveyerConfig) {
 	conf = &ConveyerConfig{
-		NsqlookupdURLs: "http://127.0.0.1:4161",
-		Topic:          "visits",
-		Channel:        "ch",
-		ClickHouseURL:  "tcp://127.0.0.1:9000",
-		Table:          "visits",
-		Window:         60 * 60,
-		PubTest:        0,
-		PubQuit:        false,
-		Debug:          false,
+		MqAddrs:       "127.0.0.1:9092",
+		Topic:         "visits",
+		Channel:       "ch",
+		ClickHouseURL: "tcp://127.0.0.1:9000",
+		Table:         "visits",
+		Window:        60 * 60,
+		PubTest:       0,
+		PubQuit:       false,
+		Debug:         false,
 	}
 	return conf
 }
@@ -265,7 +234,7 @@ func NewConveyerConfig() (conf *ConveyerConfig) {
 func parseConfig() (conf *ConveyerConfig) {
 	conf = NewConveyerConfig()
 	flagSet := flag.NewFlagSet("conveyer", flag.ExitOnError)
-	flagSet.StringVar(&conf.NsqlookupdURLs, "nsqlookupd-urls", conf.NsqlookupdURLs, "List of URLs of nsqlookupd.")
+	flagSet.StringVar(&conf.MqAddrs, "message queue addresses", conf.MqAddrs, "List of Kafka brokers addr.")
 	flagSet.StringVar(&conf.Topic, "topic", conf.Topic, "NSQ topic.")
 	flagSet.StringVar(&conf.Channel, "channel", conf.Channel, "NSQ channel.")
 	flagSet.StringVar(&conf.ClickHouseURL, "clickhouse-url", conf.ClickHouseURL, "ClickHouse url. Use url parameter \"debug=true\" to enable the clickhouse client's log.")
@@ -319,17 +288,40 @@ func main() {
 	db, err = prepareClickhouse(cc)
 	checkErr(err)
 
-	nc := nsq.NewConfig()
-	nc.EnableOrdered = true
-	nc.MaxAttempts = 5
-
-	q, _ := nsq.NewConsumer(cc.Topic, cc.Channel, nc)
-	h := NewVisitMsgHandler(q)
-	q.AddHandler(h)
-	q.ConnectToNSQLookupds(strings.Split(cc.NsqlookupdURLs, ","))
-
-	ins := NewCkInsertor(h.visitCh, cc.Window, db, cc.Table)
 	ctx, cancel := context.WithCancel(context.Background())
+
+	visitCh := make(chan *Visit, 10000)
+
+	var consumer sarama.Consumer
+	var pc sarama.PartitionConsumer
+	consumer, err = sarama.NewConsumer(strings.Split(cc.MqAddrs, ","), nil)
+	checkErr(err)
+	pc, err = consumer.ConsumePartition("visits3", 0, 1024) //TODO: use privious offset?
+	checkErr(err)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				pc.Close()
+				consumer.Close()
+				return
+			case message := <-pc.Messages():
+				//protobuf decode
+				visit := &Visit{}
+				if err = visit.Unmarshal(message.Value); err != nil {
+					err = errors.Wrapf(err, "")
+					log.Error("got error: %+v", err)
+					continue
+				}
+				visitCh <- visit
+			case pce := <-pc.Errors():
+				err = errors.Wrapf(pce.Err, "topic %v, partition %v, ", pce.Topic, pce.Partition)
+				log.Error("got error: %+v", err)
+			}
+		}
+	}()
+
+	ins := NewCkInsertor(visitCh, cc.Window, db, cc.Table)
 	ins.Serve(ctx)
 
 	sc := make(chan os.Signal, 1)
@@ -349,8 +341,7 @@ func main() {
 			continue
 		default:
 			cancel()
-			q.Stop()
-			<-q.StopChan
+			time.Sleep(5 * time.Second)
 			log.Infof("exit: bye :-).")
 			os.Exit(1)
 		}
