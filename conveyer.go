@@ -100,7 +100,7 @@ func (ins *CkInsertor) doInsert(ctx context.Context, visits []*Visit) {
 	}
 	err = tx.Commit()
 	checkErr(err)
-	log.Debugf("got %d visits from NSQ, inserted %d rows to ClickHouse", len(visits), inserted)
+	log.Debugf("got %d visits from Kafka, inserted %d rows to ClickHouse", len(visits), inserted)
 }
 
 func (ins *CkInsertor) Serve(ctx context.Context) {
@@ -212,7 +212,7 @@ type ConveyerConfig struct {
 	ClickHouseURL string
 	Table         string
 	Window        int  //merge time window, in seconds
-	PubTest       int  //publish some test messages to NSQ
+	PubTest       int  //publish some test messages to Kafka
 	PubQuit       bool //quit after publish
 	Debug         bool
 }
@@ -234,25 +234,23 @@ func NewConveyerConfig() (conf *ConveyerConfig) {
 
 func parseConfig() (conf *ConveyerConfig) {
 	conf = NewConveyerConfig()
-	flagSet := flag.NewFlagSet("conveyer", flag.ExitOnError)
-	flagSet.StringVar(&conf.MqAddrs, "message queue addresses", conf.MqAddrs, "List of Kafka brokers addr.")
-	flagSet.StringVar(&conf.Topic, "topic", conf.Topic, "NSQ topic.")
-	flagSet.StringVar(&conf.Channel, "channel", conf.Channel, "NSQ channel.")
-	flagSet.StringVar(&conf.ClickHouseURL, "clickhouse-url", conf.ClickHouseURL, "ClickHouse url. Use url parameter \"debug=true\" to enable the clickhouse client's log.")
-	flagSet.StringVar(&conf.Table, "table", conf.Table, "ClickHouse table.")
-	flagSet.IntVar(&conf.Window, "window", conf.Window, "Deduplicate time window, in seconds.")
-	flagSet.IntVar(&conf.PubTest, "pub-test", conf.PubTest, "Publish some test messages to NSQ.")
-	flagSet.BoolVar(&conf.PubQuit, "pub-quit", conf.PubQuit, "Quit after publish.")
-	flagSet.BoolVar(&conf.Debug, "debug", conf.Debug, "Set log level to DEBUG.")
-	showVer := flagSet.Bool("version", false, "Show version and quit.")
-	flagSet.Parse(os.Args[1:])
+	flag.StringVar(&conf.MqAddrs, "mq-addrs", conf.MqAddrs, "List of Kafka brokers addr.")
+	flag.StringVar(&conf.Topic, "topic", conf.Topic, "Kafka topic.")
+	flag.StringVar(&conf.Channel, "channel", conf.Channel, "Kafka channel.")
+	flag.StringVar(&conf.ClickHouseURL, "clickhouse-url", conf.ClickHouseURL, "ClickHouse url. Use url parameter \"debug=true\" to enable the clickhouse client's log.")
+	flag.StringVar(&conf.Table, "table", conf.Table, "ClickHouse table.")
+	flag.IntVar(&conf.Window, "window", conf.Window, "Deduplicate time window, in seconds.")
+	flag.IntVar(&conf.PubTest, "pub-test", conf.PubTest, "Publish some test messages to Kafka.")
+	flag.BoolVar(&conf.PubQuit, "pub-quit", conf.PubQuit, "Quit after publish.")
+	flag.BoolVar(&conf.Debug, "debug", conf.Debug, "Set log level to DEBUG.")
+	showVer := flag.Bool("version", false, "Show version and quit.")
+	flag.Parse()
 	if *showVer {
-		out := flagSet.Output()
-		fmt.Fprintf(out, "conveyer Version: %s\n", Version)
-		fmt.Fprintf(out, "Git SHA: %s\n", GitSHA)
-		fmt.Fprintf(out, "BuildTime: %s\n", BuildTime)
-		fmt.Fprintf(out, "Go Version: %s\n", runtime.Version())
-		fmt.Fprintf(out, "Go OS/Arch: %s/%s\n", runtime.GOOS, runtime.GOARCH)
+		fmt.Printf("conveyer Version: %s\n", Version)
+		fmt.Printf("Git SHA: %s\n", GitSHA)
+		fmt.Printf("BuildTime: %s\n", BuildTime)
+		fmt.Printf("Go Version: %s\n", runtime.Version())
+		fmt.Printf("Go OS/Arch: %s/%s\n", runtime.GOOS, runtime.GOARCH)
 		os.Exit(0)
 	}
 	return
@@ -275,7 +273,6 @@ func main() {
 	log.SetFormatter(formatter)
 	if cc.Debug {
 		log.SetLevel(log.DebugLevel)
-		//TODO: set NSQ consumer log level to nsq.LogLevelDebug
 	}
 
 	if cc.PubTest != 0 {
