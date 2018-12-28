@@ -15,9 +15,20 @@
 # Project-local glide cache, RE: https://github.com/Masterminds/glide/issues/736
 .glide/
 
-
 # Porject-local vscode cache
 .vscode/
 
 # Project-local SCons cache
 .sconsign.dblite
+
+# Gradle project-specific cache directory
+.gradle
+
+# Gradle build output directory
+build
+
+# Please project-specific cache directory
+.plz-cache
+
+# Please build output directory
+plz-out
