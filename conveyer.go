@@ -100,7 +100,7 @@ func (ins *CkInsertor) doInsert(ctx context.Context, visits []*Visit) {
 	}
 	err = tx.Commit()
 	checkErr(err)
-	log.Debugf("got %d visits from Kafka, inserted %d rows to ClickHouse", len(visits), inserted)
+	log.Infof("got %d visits from Kafka, inserted %d rows to ClickHouse", len(visits), inserted)
 }
 
 func (ins *CkInsertor) Serve(ctx context.Context) {
