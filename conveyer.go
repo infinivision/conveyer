@@ -18,7 +18,7 @@ import (
 	cluster "github.com/bsm/sarama-cluster"
 	"github.com/jmoiron/sqlx"
 	"github.com/kshvakov/clickhouse"
-	"github.com/patrickmn/go-cache"
+	cache "github.com/patrickmn/go-cache"
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/context"
@@ -312,7 +312,7 @@ func main() {
 					visit := &Visit{}
 					if err = visit.Unmarshal(msg.Value); err != nil {
 						err = errors.Wrapf(err, "")
-						log.Error("got error: %+v", err)
+						log.Errorf("got error: %+v", err)
 						continue
 					}
 					visitCh <- visit
@@ -320,7 +320,7 @@ func main() {
 				}
 			case err := <-consumer.Errors():
 				err = errors.Wrapf(err, "")
-				log.Error("got error: %+v", err)
+				log.Fatalf("got error: %+v", err)
 			case ntf := <-consumer.Notifications():
 				log.Infof("Rebalanced: %+v", ntf)
 			}
