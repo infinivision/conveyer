@@ -109,6 +109,7 @@ func (ins *CkInsertor) Serve(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			log.Infof("CkInsertor.Serve goroutine exited")
 			return
 		case visitMsg := <-ins.visitCh:
 			visitMsgs = append(visitMsgs, visitMsg)
@@ -305,19 +306,24 @@ func main() {
 		for {
 			select {
 			case <-ctx.Done():
+				log.Infof("Kafka consumer goroutine exited due to contex done.")
 				return
 			case msg, ok := <-consumer.Messages():
-				if ok {
-					//protobuf decode
-					visit := &Visit{}
-					if err = visit.Unmarshal(msg.Value); err != nil {
-						err = errors.Wrapf(err, "")
-						log.Errorf("got error: %+v", err)
-						continue
-					}
-					visitCh <- visit
-					consumer.MarkOffset(msg, "") // mark message as processed
+				if !ok {
+					log.Infof("Kafka consumer goroutine exited due to consumer channel be closed.")
+					return
 				}
+				log.Debugf("got a message from Kafka")
+				//protobuf decode
+				visit := &Visit{}
+				if err = visit.Unmarshal(msg.Value); err != nil {
+					err = errors.Wrapf(err, "")
+					log.Errorf("got error: %+v", err)
+					continue
+				}
+				log.Debugf("decoded ok")
+				visitCh <- visit
+				consumer.MarkOffset(msg, "") // mark message as processed
 			case err := <-consumer.Errors():
 				err = errors.Wrapf(err, "")
 				log.Fatalf("got error: %+v", err)
@@ -328,14 +334,16 @@ func main() {
 	}()
 
 	ins := NewCkInsertor(visitCh, cc.Window, db, cc.Table)
-	ins.Serve(ctx)
+	go ins.Serve(ctx)
 
 	sc := make(chan os.Signal, 1)
 	signal.Notify(sc,
 		syscall.SIGINT,
 		syscall.SIGTERM,
 		syscall.SIGQUIT,
-		syscall.SIGUSR1)
+		syscall.SIGUSR1,
+		syscall.SIGUSR2,
+	)
 	for {
 		sig := <-sc
 		log.Infof("got signal %s", sig.String())
@@ -344,6 +352,16 @@ func main() {
 			buf := bytes.NewBuffer([]byte{})
 			_ = runPprof.Lookup("goroutine").WriteTo(buf, 1)
 			log.Infof(buf.String())
+			continue
+		case syscall.SIGUSR2:
+			log.Infof("got signal=<%d>.", sig)
+			if log.GetLevel() != log.DebugLevel {
+				log.Info("changed log level to debug")
+				log.SetLevel(log.DebugLevel)
+			} else {
+				log.Info("changed log level to info")
+				log.SetLevel(log.InfoLevel)
+			}
 			continue
 		default:
 			cancel()
